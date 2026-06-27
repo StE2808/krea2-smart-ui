@@ -326,7 +326,7 @@ let uid = 0;
 $("#dice").onclick = () => { $("#seed").value = ""; };
 
 $("#quit").onclick = async () => {
-  if (!confirm("Chiudere l'interfaccia e il server?\n(ComfyUI resta acceso a parte.)")) return;
+  if (!confirm("Chiudere l'interfaccia e il server? (ComfyUI resta acceso a parte.)")) return;
   try { await fetch("/api/quit"); } catch(e){}
   document.body.innerHTML =
     '<div style="display:flex;height:100vh;align-items:center;justify-content:center;'+
