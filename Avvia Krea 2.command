@@ -447,6 +447,17 @@ $("#metadlg").addEventListener("click", e => { if (e.target.id === "metadlg") $(
 function zoom(url){ $("#lbimg").src = url; $("#lb").showModal(); }
 $("#lb").onclick = () => $("#lb").close();
 function setMsg(t, err){ msg.textContent = t; msg.className = "msg" + (err?" err":""); }
+
+// all'apertura: ricarica le ultime immagini gia' presenti in output/
+async function loadGallery(){
+  let res;
+  try { res = await (await fetch("/api/galleria")).json(); } catch(e){ return; }
+  (res.images || []).forEach(im => {
+    items.push({id:++uid, status:"done", file:im.file, label:"salvata", canUpscale:!im.up});
+  });
+  render();
+}
+loadGallery();
 </script>
 </body>
 </html>
@@ -485,6 +496,15 @@ class Handler(BaseHTTPRequestHandler):
             if f.exists(): self._send(200, f.read_bytes(), "image/png")
             else: self._send(404, "non trovata", "text/plain")
             return
+        if u.path == "/api/galleria":
+            imgs = []
+            try:
+                files = sorted(OUTPUT.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True)[:24]
+                imgs = [{"file": p.name, "up": p.name.startswith("Krea2_up")} for p in files]
+            except Exception:
+                pass
+            self._send(200, {"images": imgs}); return
+
         if u.path == "/api/meta":
             name = os.path.basename(parse_qs(u.query).get("file", [""])[0])
             f = OUTPUT / name
