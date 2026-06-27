@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# Credenziali / segreti (per sicurezza, anche se qui non ce ne sono)
+credentials.yaml
+.env
+*.key
+*.pem
+.secrets/
+
+# Niente immagini o output nel repo
+*.png
+*.jpg
+*.jpeg
+output/
