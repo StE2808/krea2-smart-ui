@@ -517,7 +517,9 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/galleria":
             imgs = []
             try:
-                files = sorted(OUTPUT.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True)[:24]
+                nasc = load_nascoste()
+                files = sorted(OUTPUT.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
+                files = [p for p in files if p.name not in nasc][:24]
                 imgs = [{"file": p.name, "up": p.name.startswith("Krea2_up")} for p in files]
             except Exception:
                 pass
@@ -552,6 +554,33 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/upscale":
             self._upscale(req); return
+
+        if path == "/api/sblocca":
+            if (req.get("password") or "") != PASSWORD_GALLERIA:
+                self._send(200, {"ok": False}); return
+            nasc = load_nascoste(); items = []
+            try:
+                files = sorted(OUTPUT.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
+                items = [{"file": p.name, "up": p.name.startswith("Krea2_up")}
+                         for p in files if p.name in nasc]
+            except Exception:
+                pass
+            self._send(200, {"ok": True, "items": items}); return
+
+        if path == "/api/nascondi":
+            name = os.path.basename(req.get("file") or "")
+            if not name:
+                self._send(400, {"error": "file mancante"}); return
+            nasc = load_nascoste(); nasc.add(name); save_nascoste(nasc)
+            self._send(200, {"ok": True}); return
+
+        if path == "/api/mostra":
+            name = os.path.basename(req.get("file") or "")
+            if not name:
+                self._send(400, {"error": "file mancante"}); return
+            nasc = load_nascoste(); nasc.discard(name); save_nascoste(nasc)
+            self._send(200, {"ok": True}); return
+
         if path != "/api/genera":
             self._send(404, "not found", "text/plain"); return
 
