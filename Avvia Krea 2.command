@@ -15,6 +15,7 @@ Solo libreria standard di Python: niente da installare.
 """
 
 import json, os, random, shutil, subprocess, threading, time, webbrowser
+import socket, base64, struct
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, unquote
@@ -108,6 +109,100 @@ def comfy_post(path, payload):
 
 def comfy_get(path):
     return json.loads(urllib.request.urlopen(COMFY + path, timeout=30).read())
+
+def comfy_post_noparse(path, payload):
+    """POST verso ComfyUI senza interpretare la risposta (es. /interrupt e /queue
+    rispondono 200 con corpo vuoto: json.loads fallirebbe)."""
+    req = urllib.request.Request(COMFY + path, data=json.dumps(payload).encode(),
+                                 headers={"Content-Type": "application/json"})
+    urllib.request.urlopen(req, timeout=10).read()
+
+# ---------------------------------------------------------------------------
+# Ponte WebSocket verso ComfyUI per i progressi (step x/8)
+# ---------------------------------------------------------------------------
+# ComfyUI ha un origin_only_middleware: se l'handshake WS ha Host e Origin con
+# host diverso (qui le porte 8189 vs 8190) risponde 403. Il browser manda sempre
+# Origin, quindi non puo' collegarsi al WS di ComfyUI. Soluzione: ci colleghiamo
+# NOI (lato server, SENZA header Origin -> il middleware non blocca) e teniamo
+# aggiornato PROGRESS, che il browser legge via GET /api/progress (stessa origine).
+PROGRESS = {"value": 0, "max": 0, "prompt_id": None}
+
+def _ws_recv_exact(sock, n):
+    buf = b""
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise ConnectionError("ws chiuso")
+        buf += chunk
+    return buf
+
+def _ws_read_frame(sock):
+    """Legge un frame WebSocket. I frame server->client NON sono mascherati."""
+    b0, b1 = _ws_recv_exact(sock, 2)
+    opcode = b0 & 0x0F
+    masked = b1 & 0x80
+    ln = b1 & 0x7F
+    if ln == 126:
+        ln = struct.unpack(">H", _ws_recv_exact(sock, 2))[0]
+    elif ln == 127:
+        ln = struct.unpack(">Q", _ws_recv_exact(sock, 8))[0]
+    mask = _ws_recv_exact(sock, 4) if masked else b""
+    data = _ws_recv_exact(sock, ln) if ln else b""
+    if masked:
+        data = bytes(c ^ mask[i % 4] for i, c in enumerate(data))
+    return opcode, data
+
+def _ws_send_pong(sock, payload):
+    """Risponde a un ping. I frame client->server DEVONO essere mascherati."""
+    mask = os.urandom(4)
+    body = bytes(c ^ mask[i % 4] for i, c in enumerate(payload))
+    sock.sendall(bytes([0x8A, 0x80 | (len(payload) & 0x7F)]) + mask + body)
+
+def progress_bridge():
+    """Mantiene una connessione WS a ComfyUI e aggiorna PROGRESS. Si riconnette da solo."""
+    host, port = "127.0.0.1", 8189
+    while True:
+        try:
+            sock = socket.create_connection((host, port), timeout=10)
+            key = base64.b64encode(os.urandom(16)).decode()
+            handshake = ("GET /ws?clientId=krea2bridge HTTP/1.1\r\n"
+                         "Host: %s:%d\r\n"
+                         "Upgrade: websocket\r\n"
+                         "Connection: Upgrade\r\n"
+                         "Sec-WebSocket-Key: %s\r\n"
+                         "Sec-WebSocket-Version: 13\r\n\r\n") % (host, port, key)
+            sock.sendall(handshake.encode())
+            resp = b""
+            while b"\r\n\r\n" not in resp:
+                chunk = sock.recv(1024)
+                if not chunk:
+                    raise ConnectionError("handshake interrotto")
+                resp += chunk
+            if b" 101 " not in resp.split(b"\r\n", 1)[0]:
+                raise ConnectionError("no 101")
+            sock.settimeout(None)
+            while True:
+                opcode, data = _ws_read_frame(sock)
+                if opcode == 0x8:                       # close
+                    break
+                if opcode == 0x9:                       # ping -> pong
+                    _ws_send_pong(sock, data); continue
+                if opcode != 0x1:                       # ci interessa solo il testo
+                    continue
+                try:
+                    msg = json.loads(data.decode("utf-8"))
+                except Exception:
+                    continue
+                if msg.get("type") == "progress":
+                    d = msg.get("data", {})
+                    if d.get("max"):
+                        PROGRESS.update(value=d.get("value", 0), max=d["max"],
+                                        prompt_id=d.get("prompt_id"))
+        except Exception:
+            pass
+        try: sock.close()
+        except Exception: pass
+        time.sleep(2)                                   # riprova a collegarsi
 
 def ensure_comfy():
     """Se ComfyUI non risponde, prova ad avviarlo dal venv e aspetta che sia pronto."""
@@ -226,6 +321,7 @@ PAGE = """<!DOCTYPE html>
   .go { margin-top:16px; width:100%; background:var(--acc); color:#1a1205; font-weight:700;
         padding:14px; font-size:16px; }
   .go:disabled { opacity:.55; cursor:default; }
+  .go.busy { color:#fff; cursor:pointer; transition:background .2s ease; }
   .msg { margin-top:12px; font-size:13px; color:var(--mut); min-height:18px; }
   .msg.err { color:#ff6b6b; }
   .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:14px; margin-top:22px; }
@@ -358,6 +454,21 @@ let items = [];           // {id,label,status:'pending'|'done'|'failed',file,can
 let page = 0;
 let uid = 0;
 let unlocked = false;     // galleria nascosta sbloccata in questa sessione
+let gen = null;           // generazione in corso: {total, doneCount, ids} oppure null
+let curGen = 0;           // token: invalidare i polling quando si preme STOP
+let progTimer = null;     // polling progressi verso /api/progress (il server fa da ponte al WS di ComfyUI)
+
+// Lo step x/8 arriva dal nostro server (che si collega lui al WS di ComfyUI: il browser
+// non puo' per via dell'origin check). Interroghiamo /api/progress mentre si genera.
+function startProgPoll(){
+  stopProgPoll();
+  progTimer = setInterval(async () => {
+    if (!gen){ stopProgPoll(); return; }
+    let p; try { p = await (await fetch("/api/progress")).json(); } catch(e){ return; }
+    if (p && p.max && gen && gen.ids.indexOf(p.prompt_id) >= 0) setProgress(p.value / p.max);
+  }, 500);
+}
+function stopProgPoll(){ if (progTimer){ clearInterval(progTimer); progTimer = null; } }
 
 $("#dice").onclick = () => { $("#seed").value = ""; };
 
@@ -398,6 +509,7 @@ $("#quit").onclick = async () => {
 };
 
 $("#go").onclick = async () => {
+  if (gen){ stopGen(); return; }            // gia' in generazione: il bottone fa da STOP
   const prompt = $("#prompt").value.trim();
   if (!prompt) { setMsg("Scrivi un prompt.", true); return; }
   const [w,h] = $("#size").value.split("x").map(Number);
@@ -412,12 +524,17 @@ $("#go").onclick = async () => {
   try { res = await (await fetch("/api/genera",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})).json(); }
   catch(e){ setMsg("Errore di rete: "+e, true); $("#go").disabled=false; return; }
   if (res.error){ setMsg(res.error, true); $("#go").disabled=false; return; }
-  setMsg("In generazione... (Turbo: ~1 min a bozza)");
+  setMsg("");
+  const myGen = ++curGen;
+  gen = { total: res.jobs.length, doneCount: 0, ids: res.jobs.map(j => j.prompt_id) };
+  $("#go").disabled = false;
+  $("#go").classList.add("busy");
+  setProgress(0);
+  startProgPoll();
   res.jobs.forEach(job => {
     const it = addItem({label:"seed "+job.seed, canUpscale:true});
-    poll(job.prompt_id, it);
+    poll(job.prompt_id, it, myGen);
   });
-  $("#go").disabled = false;
 };
 
 async function upscale(file){
@@ -447,18 +564,51 @@ async function mostra(file){
   render();
 }
 
+// --- barra di avanzamento sul pulsantone (e STOP) ---
+function setProgress(frac){
+  if (!gen) return;
+  const pct = Math.max(0, Math.min(100, Math.round((frac||0)*100)));
+  const b = $("#go");
+  b.style.background = "linear-gradient(to right, var(--acc) "+pct+"%, #4a3a28 "+pct+"%)";
+  b.textContent = "■ STOP · immagine "+(gen.doneCount+1)+"/"+gen.total+" · "+pct+"%";
+}
+function endGen(msg){
+  gen = null;
+  stopProgPoll();
+  const b = $("#go");
+  b.classList.remove("busy");
+  b.style.background = "";
+  b.textContent = "GENERA";
+  if (msg !== undefined) setMsg(msg);
+}
+async function stopGen(){
+  const ids = gen ? gen.ids.slice() : [];
+  curGen++;                                              // invalida i polling in corso
+  try { await fetch("/api/stop",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({prompt_ids:ids})}); } catch(e){}
+  items = items.filter(it => it.status !== "pending");   // togli le card mai prodotte
+  render();
+  endGen("Generazione interrotta.");
+}
+function jobDone(genToken){
+  if (!gen || (genToken && genToken !== curGen)) return;
+  gen.doneCount++;
+  if (gen.doneCount >= gen.total) endGen("Fatto.");
+  else setProgress(0);                                   // prossima immagine: barra da capo
+}
+
 function addItem(it){ it.id = ++uid; it.status = "pending"; items.unshift(it); page = 0; render(); return it; }
 
-async function poll(prompt_id, it){
+async function poll(prompt_id, it, genToken){
   for (let i=0;i<240;i++){
     await new Promise(r=>setTimeout(r,2000));
+    if (genToken && genToken !== curGen) return;         // generazione annullata con STOP
     let st;
     try { st = await (await fetch("/api/stato?id="+prompt_id)).json(); } catch(e){ continue; }
     if (st.done && st.images.length){
-      it.status = "done"; it.file = st.images[0]; render(); return;
+      it.status = "done"; it.file = st.images[0]; render(); jobDone(genToken); return;
     }
   }
-  it.status = "failed"; render();
+  it.status = "failed"; render(); jobDone(genToken);
 }
 
 function cardHTML(it){
@@ -591,6 +741,9 @@ class Handler(BaseHTTPRequestHandler):
                 pass
             self._send(200, {"images": imgs}); return
 
+        if u.path == "/api/progress":
+            self._send(200, PROGRESS); return
+
         if u.path == "/api/meta":
             name = os.path.basename(parse_qs(u.query).get("file", [""])[0])
             f = OUTPUT / name
@@ -647,6 +800,19 @@ class Handler(BaseHTTPRequestHandler):
             nasc = load_nascoste(); nasc.discard(name); save_nascoste(nasc)
             self._send(200, {"ok": True}); return
 
+        if path == "/api/stop":
+            ids = req.get("prompt_ids") or []
+            try:
+                comfy_post_noparse("/interrupt", {})              # ferma quella in esecuzione
+            except Exception:
+                pass
+            if ids:
+                try:
+                    comfy_post_noparse("/queue", {"delete": ids}) # togli dalla coda quelle in attesa
+                except Exception:
+                    pass
+            self._send(200, {"ok": True}); return
+
         if path != "/api/genera":
             self._send(404, "not found", "text/plain"); return
 
@@ -657,11 +823,15 @@ class Handler(BaseHTTPRequestHandler):
         width  = int(req.get("width", 512)); height = int(req.get("height", 768))
         batch  = max(1, min(6, int(req.get("batch", 1))))
         seed_in = req.get("seed")
+        client_id = req.get("client_id")           # per ricevere i progressi sul WS di quel client
         jobs = []
         for i in range(batch):
             seed = int(seed_in) if (seed_in not in (None, "", 0) and batch == 1) else random.randint(0, 2**32 - 1)
             try:
-                resp = comfy_post("/prompt", {"prompt": build_graph(prompt, nudo, width, height, seed)})
+                payload = {"prompt": build_graph(prompt, nudo, width, height, seed)}
+                if client_id:
+                    payload["client_id"] = client_id
+                resp = comfy_post("/prompt", payload)
                 jobs.append({"prompt_id": resp.get("prompt_id"), "seed": seed})
             except urllib.error.HTTPError as e:
                 self._send(502, {"error": "ComfyUI ha rifiutato: " + e.read().decode()}); return
@@ -693,6 +863,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     print("=== Interfaccia Smart Krea 2 ===")
     ensure_comfy()
+    threading.Thread(target=progress_bridge, daemon=True).start()   # ponte progressi WS
     print(f"Interfaccia su  http://127.0.0.1:{PORT}   (lascia questa finestra aperta)")
     try: webbrowser.open(f"http://127.0.0.1:{PORT}")
     except Exception: pass
