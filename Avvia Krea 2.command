@@ -29,6 +29,8 @@ PROJECT  = BASE.parent                              # .../Krea 2
 COMFYDIR = PROJECT / "ComfyUI"
 OUTPUT   = COMFYDIR / "output"                      # dove ComfyUI salva le immagini
 INPUT    = COMFYDIR / "input"                       # da dove LoadImage legge (per l'upscale)
+VENV_PY  = COMFYDIR / "venv" / "bin" / "python"     # python del venv ComfyUI (ha numpy+PIL)
+GRAIN_PY = BASE / "film_grain.py"                   # script grana fotografica (post-upscale)
 NASCOSTE_FILE = BASE / "nascoste.json"   # nomi-file nascosti dalla galleria (dato locale, NON nel repo)
 
 COMFY    = "http://127.0.0.1:8189"   # il motore
@@ -410,9 +412,21 @@ PAGE = """<!DOCTYPE html>
       <div>
         <label>Upscaler (per il bottone sotto le immagini)</label>
         <select id="upscaler">
-          <option value="4x_foolhardy_Remacri.pth">Remacri 4x - grana/pelle (consigliato)</option>
-          <option value="RealESRGAN_x4plus.pth">RealESRGAN 4x - piu' liscio</option>
+          <optgroup label="Veloci (~10s, look fotografico)">
+            <option value="4x_foolhardy_Remacri.pth">Remacri 4x - grana/pelle (consigliato)</option>
+            <option value="4xNomos2_realplksr_dysample.pth">Nomos2 RealPLKSR 4x - foto, preserva profondita'</option>
+            <option value="4xLSDIR.pth">LSDIR 4x - generalista nitido</option>
+            <option value="4xNomos2_otf_esrgan.pth">Nomos2 OTF ESRGAN 4x - pulisce compressione</option>
+          </optgroup>
+          <optgroup label="Altro">
+            <option value="RealESRGAN_x4plus.pth">RealESRGAN 4x - piu' liscio (plastica la pelle)</option>
+          </optgroup>
         </select>
+      </div>
+      <div>
+        <label>Grana pellicola (bottone sotto le immagini): <span id="grainval">0.020</span></label>
+        <input type="range" id="grain" min="0" max="0.06" step="0.0025" value="0.02" style="width:100%">
+        <div style="font-size:12px;opacity:.6;margin-top:2px">Maschera il reticolo dell'upscale e da' look pellicola. ~0.02 delicata, ~0.04 marcata.</div>
       </div>
     </div>
 
@@ -471,6 +485,7 @@ function startProgPoll(){
 function stopProgPoll(){ if (progTimer){ clearInterval(progTimer); progTimer = null; } }
 
 $("#dice").onclick = () => { $("#seed").value = ""; };
+$("#grain").oninput = e => { $("#grainval").textContent = Number(e.target.value).toFixed(3); };
 
 $("#perpage").onchange = () => { PER = parseInt($("#perpage").value) || 8; page = 0; render(); };
 
@@ -538,15 +553,28 @@ $("#go").onclick = async () => {
 };
 
 async function upscale(file){
-  const model = $("#upscaler").value;
+  const sel = $("#upscaler");
+  const model = sel.value;
+  const nice = sel.options[sel.selectedIndex].text.split(" - ")[0];
   setMsg("Upscale in corso... (~10 s)");
   let res;
   try { res = await (await fetch("/api/upscale",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({filename:file, model})})).json(); }
   catch(e){ setMsg("Errore upscale: "+e, true); return; }
   if (res.error){ setMsg(res.error, true); return; }
-  const nice = model.indexOf("Remacri")>=0 ? "Remacri 4x" : "RealESRGAN 4x";
   const it = addItem({label:"upscale "+nice, canUpscale:false});
   poll(res.prompt_id, it);
+  setMsg("");
+}
+
+async function grana(file){
+  const s = $("#grain").value;
+  setMsg("Grana in corso... (~3 s)");
+  let res;
+  try { res = await (await fetch("/api/grana",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({filename:file, strength:s})})).json(); }
+  catch(e){ setMsg("Errore grana: "+e, true); return; }
+  if (res.error){ setMsg(res.error, true); return; }
+  const it = addItem({label:"grana "+s, canUpscale:true});
+  it.status = "done"; it.file = res.file; render();
   setMsg("");
 }
 
@@ -620,6 +648,7 @@ function cardHTML(it){
             <div class="meta"><span>${it.label}</span></div></div>`;
   const url = "/img/"+encodeURIComponent(it.file);
   const up = it.canUpscale ? `<button data-act="up" data-file="${it.file}">&#10530; Upscale &#215;4</button>` : "";
+  const gr = `<button data-act="grana" data-file="${it.file}">&#127902; Grana</button>`;
   const lock = it.hidden ? ` <span class="tag" title="immagine nascosta">&#128274;</span>` : "";
   const hideBtn = it.hidden
     ? `<button data-act="mostra" data-file="${it.file}">&#128065; Rendi visibile</button>`
@@ -627,7 +656,7 @@ function cardHTML(it){
   return `<div class="card">
     <img src="${url}" data-act="zoom" data-file="${it.file}">
     <div class="meta"><span>${it.label}${lock}</span><a href="${url}" download>scarica</a></div>
-    <div class="acts"><button data-act="meta" data-file="${it.file}">&#9432; Dati</button>${up}${hideBtn}</div>
+    <div class="acts"><button data-act="meta" data-file="${it.file}">&#9432; Dati</button>${up}${gr}${hideBtn}</div>
   </div>`;
 }
 
@@ -651,6 +680,7 @@ grid.onclick = e => {
   const f = b.dataset.file;
   if (b.dataset.act === "zoom") zoom("/img/"+encodeURIComponent(f));
   else if (b.dataset.act === "up") upscale(f);
+  else if (b.dataset.act === "grana") grana(f);
   else if (b.dataset.act === "meta") showMeta(f);
   else if (b.dataset.act === "nascondi") nascondi(f);
   else if (b.dataset.act === "mostra") mostra(f);
@@ -774,6 +804,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/upscale":
             self._upscale(req); return
 
+        if path == "/api/grana":
+            self._grana(req); return
+
         if path == "/api/sblocca":
             if (req.get("password") or "") != PASSWORD_GALLERIA:
                 self._send(200, {"ok": False}); return
@@ -858,6 +891,36 @@ class Handler(BaseHTTPRequestHandler):
             self._send(502, {"error": "ComfyUI ha rifiutato: " + e.read().decode()})
         except Exception as e:
             self._send(502, {"error": f"ComfyUI non raggiungibile ({e})."})
+
+    def _grana(self, req):
+        """Grana fotografica in post (NON passa da ComfyUI). Delega il lavoro pesante al
+        python del venv ComfyUI (ha numpy+PIL); il server resta solo-stdlib. Sincrono:
+        l'immagine e' pronta al ritorno, niente polling."""
+        filename = os.path.basename(req.get("filename") or "")
+        try:
+            strength = float(req.get("strength", 0.04))
+        except Exception:
+            strength = 0.04
+        strength = max(0.0, min(0.15, strength))
+        src = OUTPUT / filename
+        if not filename or not src.exists():
+            self._send(400, {"error": "immagine per la grana non trovata"}); return
+        if not VENV_PY.exists():
+            self._send(500, {"error": "python del venv ComfyUI non trovato (serve numpy+PIL)"}); return
+        if not GRAIN_PY.exists():
+            self._send(500, {"error": "film_grain.py non trovato accanto all'interfaccia"}); return
+        dst = OUTPUT / (src.stem + "_grain.png")
+        n = 1
+        while dst.exists():
+            n += 1; dst = OUTPUT / f"{src.stem}_grain{n}.png"
+        try:
+            subprocess.run([str(VENV_PY), str(GRAIN_PY), str(src), str(dst), str(strength)],
+                           check=True, capture_output=True, timeout=120)
+            self._send(200, {"file": dst.name})
+        except subprocess.CalledProcessError as e:
+            self._send(500, {"error": "grana fallita: " + (e.stderr.decode()[:200] if e.stderr else "errore")})
+        except Exception as e:
+            self._send(500, {"error": f"grana fallita: {e}"})
 
 
 def main():
