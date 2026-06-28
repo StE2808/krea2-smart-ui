@@ -278,7 +278,7 @@ PAGE = """<!DOCTYPE html>
 <div class="wrap">
   <div class="panel">
     <label>Prompt</label>
-    <textarea id="prompt" placeholder="Descrivi l'immagine in inglese...">full body photograph, head to toe, entire figure visible, face clearly visible, a beautiful young woman standing on a sandy beach, full-length portrait, completely nude, bare skin, no clothing, no towel, no fabric, natural body, relaxed pose, arms at her sides, golden hour sunlight, soft warm light, calm sea in the background, analog film photo, natural skin texture, fine grain, photorealistic</textarea>
+    <textarea id="prompt" placeholder="Descrivi l'immagine in inglese...">a serene mountain lake at sunset, photorealistic, golden light, soft reflections on the water, fine grain, analog film photo</textarea>
 
     <div class="row">
       <div>
