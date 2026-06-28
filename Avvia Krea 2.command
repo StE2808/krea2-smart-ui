@@ -251,6 +251,10 @@ PAGE = """<!DOCTYPE html>
                   border-radius:9px; padding:8px 16px; }
   .pager button:disabled { opacity:.4; cursor:default; }
   .pager span { color:var(--mut); font-size:13px; }
+  .gallerybar { display:flex; justify-content:flex-end; margin-top:18px; }
+  .reveal { background:var(--panel); color:var(--mut); border:1px solid var(--line);
+            border-radius:9px; padding:8px 14px; font-size:13px; cursor:pointer; }
+  .reveal:hover { background:#262a33; }
   #metadlg { background:var(--panel); color:var(--txt); border:1px solid var(--line);
              border-radius:14px; padding:20px; max-width:640px; width:92vw; }
   #metadlg h3 { margin:0 0 14px; }
@@ -317,6 +321,7 @@ PAGE = """<!DOCTYPE html>
     <div class="msg" id="msg"></div>
   </div>
 
+  <div class="gallerybar"><button id="reveal" class="reveal">&#128274; Mostra nascoste</button></div>
   <div class="grid" id="grid"></div>
   <div class="pager" id="pager" style="display:none">
     <button id="prev">&#8592; Indietro</button>
@@ -340,8 +345,33 @@ const PER = 6;            // immagini per pagina
 let items = [];           // {id,label,status:'pending'|'done'|'failed',file,canUpscale}
 let page = 0;
 let uid = 0;
+let unlocked = false;     // galleria nascosta sbloccata in questa sessione
 
 $("#dice").onclick = () => { $("#seed").value = ""; };
+
+$("#reveal").onclick = async () => {
+  if (unlocked){
+    items = items.filter(it => !it.hidden);   // richiudi: togli le nascoste dalla vista
+    unlocked = false;
+    $("#reveal").innerHTML = "&#128274; Mostra nascoste";
+    page = 0; render();
+    return;
+  }
+  const pw = prompt("Password per vedere le immagini nascoste:");
+  if (pw === null) return;
+  let res;
+  try { res = await (await fetch("/api/sblocca",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:pw})})).json(); }
+  catch(e){ setMsg("Errore di rete: "+e, true); return; }
+  if (!res.ok){ setMsg("Password sbagliata.", true); return; }
+  setMsg("");
+  (res.items || []).forEach(im => {
+    if (!items.some(it => it.file === im.file))
+      items.push({id:++uid, status:"done", file:im.file, label:"nascosta", canUpscale:!im.up, hidden:true});
+  });
+  unlocked = true;
+  $("#reveal").innerHTML = "&#128275; Richiudi";
+  page = 0; render();
+};
 
 $("#quit").onclick = async () => {
   if (!confirm("Chiudere l'interfaccia e il server? (ComfyUI resta acceso a parte.)")) return;
