@@ -28,15 +28,33 @@ PROJECT  = BASE.parent                              # .../Krea 2
 COMFYDIR = PROJECT / "ComfyUI"
 OUTPUT   = COMFYDIR / "output"                      # dove ComfyUI salva le immagini
 INPUT    = COMFYDIR / "input"                       # da dove LoadImage legge (per l'upscale)
+NASCOSTE_FILE = BASE / "nascoste.json"   # nomi-file nascosti dalla galleria (dato locale, NON nel repo)
 
 COMFY    = "http://127.0.0.1:8189"   # il motore
 PORT     = 8190                       # porta di questa interfaccia (separata)
+
+# Password della galleria nascosta. Riservatezza VISIVA, non sicurezza vera:
+# i file restano in output/, vengono solo tolti dalla griglia finche' non sblocchi.
+# NB: il repo e' PUBBLICO -> questa password sara' visibile su GitHub. Cambiala qui.
+PASSWORD_GALLERIA = "krea2"
 
 # Preset del nodo Rebalance = la "manopola" del modulo uncensored.
 PRESETS = {
     True:  {"multiplier": 4.0, "per_layer_weights": "1.0,1.0,1.0,1.0,1.0,1.0,1.0,2.5,5.0,1.1,4.0,1.0"},  # nudo
     False: {"multiplier": 1.0, "per_layer_weights": ""},                                                   # neutro
 }
+
+def load_nascoste():
+    """Insieme dei nomi-file nascosti. Robusto a file mancante o corrotto."""
+    try:
+        data = json.loads(NASCOSTE_FILE.read_text())
+        return set(data) if isinstance(data, list) else set()
+    except Exception:
+        return set()
+
+def save_nascoste(names):
+    """Salva l'insieme dei nascosti come array JSON ordinato."""
+    NASCOSTE_FILE.write_text(json.dumps(sorted(names)))
 
 # ---------------------------------------------------------------------------
 # Comunicazione con ComfyUI
