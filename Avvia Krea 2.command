@@ -389,6 +389,20 @@ async function upscale(file){
   setMsg("");
 }
 
+async function nascondi(file){
+  try { await fetch("/api/nascondi",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({file})}); }
+  catch(e){ setMsg("Errore nel nascondere: "+e, true); return; }
+  items = items.filter(it => it.file !== file);
+  render();
+}
+async function mostra(file){
+  try { await fetch("/api/mostra",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({file})}); }
+  catch(e){ setMsg("Errore: "+e, true); return; }
+  const it = items.find(x => x.file === file);
+  if (it) it.hidden = false;
+  render();
+}
+
 function addItem(it){ it.id = ++uid; it.status = "pending"; items.unshift(it); page = 0; render(); return it; }
 
 async function poll(prompt_id, it){
@@ -412,10 +426,14 @@ function cardHTML(it){
             <div class="meta"><span>${it.label}</span></div></div>`;
   const url = "/img/"+encodeURIComponent(it.file);
   const up = it.canUpscale ? `<button data-act="up" data-file="${it.file}">&#10530; Upscale &#215;4</button>` : "";
+  const lock = it.hidden ? ` <span class="tag" title="immagine nascosta">&#128274;</span>` : "";
+  const hideBtn = it.hidden
+    ? `<button data-act="mostra" data-file="${it.file}">&#128065; Rendi visibile</button>`
+    : `<button data-act="nascondi" data-file="${it.file}">&#128584; Nascondi</button>`;
   return `<div class="card">
     <img src="${url}" data-act="zoom" data-file="${it.file}">
-    <div class="meta"><span>${it.label}</span><a href="${url}" download>scarica</a></div>
-    <div class="acts"><button data-act="meta" data-file="${it.file}">&#9432; Dati</button>${up}</div>
+    <div class="meta"><span>${it.label}${lock}</span><a href="${url}" download>scarica</a></div>
+    <div class="acts"><button data-act="meta" data-file="${it.file}">&#9432; Dati</button>${up}${hideBtn}</div>
   </div>`;
 }
 
@@ -440,6 +458,8 @@ grid.onclick = e => {
   if (b.dataset.act === "zoom") zoom("/img/"+encodeURIComponent(f));
   else if (b.dataset.act === "up") upscale(f);
   else if (b.dataset.act === "meta") showMeta(f);
+  else if (b.dataset.act === "nascondi") nascondi(f);
+  else if (b.dataset.act === "mostra") mostra(f);
 };
 $("#prev").onclick = () => { if (page>0){ page--; render(); } };
 $("#next").onclick = () => { page++; render(); };
