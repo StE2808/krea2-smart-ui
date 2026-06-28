@@ -17,7 +17,7 @@ Solo libreria standard di Python: niente da installare.
 import json, os, random, shutil, subprocess, threading, time, webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote
 import urllib.request, urllib.error
 
 # ---------------------------------------------------------------------------
@@ -251,7 +251,10 @@ PAGE = """<!DOCTYPE html>
                   border-radius:9px; padding:8px 16px; }
   .pager button:disabled { opacity:.4; cursor:default; }
   .pager span { color:var(--mut); font-size:13px; }
-  .gallerybar { display:flex; justify-content:flex-end; margin-top:18px; }
+  .gallerybar { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:18px; }
+  .perpage { display:flex; align-items:center; gap:8px; color:var(--mut); font-size:13px; }
+  .perpage label { display:inline; margin:0; }
+  .perpage select { width:auto; padding:6px 10px; }
   .reveal { background:var(--panel); color:var(--mut); border:1px solid var(--line);
             border-radius:9px; padding:8px 14px; font-size:13px; cursor:pointer; }
   .reveal:hover { background:#262a33; }
@@ -321,7 +324,16 @@ PAGE = """<!DOCTYPE html>
     <div class="msg" id="msg"></div>
   </div>
 
-  <div class="gallerybar"><button id="reveal" class="reveal">&#128274; Mostra nascoste</button></div>
+  <div class="gallerybar">
+    <div class="perpage"><label for="perpage">Per pagina</label>
+      <select id="perpage">
+        <option value="8">8</option>
+        <option value="24">24</option>
+        <option value="48">48</option>
+        <option value="96">96</option>
+      </select></div>
+    <button id="reveal" class="reveal">&#128274; Mostra nascoste</button>
+  </div>
   <div class="grid" id="grid"></div>
   <div class="pager" id="pager" style="display:none">
     <button id="prev">&#8592; Indietro</button>
@@ -341,13 +353,15 @@ PAGE = """<!DOCTYPE html>
 <script>
 const $ = s => document.querySelector(s);
 const grid = $("#grid"), msg = $("#msg");
-const PER = 6;            // immagini per pagina
+let PER = 8;              // immagini per pagina (modificabile dal menu "Per pagina")
 let items = [];           // {id,label,status:'pending'|'done'|'failed',file,canUpscale}
 let page = 0;
 let uid = 0;
 let unlocked = false;     // galleria nascosta sbloccata in questa sessione
 
 $("#dice").onclick = () => { $("#seed").value = ""; };
+
+$("#perpage").onchange = () => { PER = parseInt($("#perpage").value) || 8; page = 0; render(); };
 
 $("#reveal").onclick = async () => {
   if (unlocked){
@@ -559,7 +573,9 @@ class Handler(BaseHTTPRequestHandler):
             threading.Thread(target=lambda: (time.sleep(0.4), os._exit(0)), daemon=True).start()
             return
         if u.path.startswith("/img/"):
-            name = os.path.basename(u.path[len("/img/"):])
+            # unquote: i nomi con spazi/virgole (es. "ChatGPT Image ..., ....png") arrivano
+            # URL-encoded da encodeURIComponent; senza decodifica il file non si trova (img rotta)
+            name = os.path.basename(unquote(u.path[len("/img/"):]))
             f = OUTPUT / name
             if f.exists(): self._send(200, f.read_bytes(), "image/png")
             else: self._send(404, "non trovata", "text/plain")
