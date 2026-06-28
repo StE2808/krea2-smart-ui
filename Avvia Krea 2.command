@@ -569,7 +569,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 nasc = load_nascoste()
                 files = sorted(OUTPUT.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
-                files = [p for p in files if p.name not in nasc][:24]
+                files = [p for p in files if p.name not in nasc]
                 imgs = [{"file": p.name, "up": p.name.startswith("Krea2_up")} for p in files]
             except Exception:
                 pass
