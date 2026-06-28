@@ -17,3 +17,6 @@ credentials.yaml
 *.jpg
 *.jpeg
 output/
+
+# Stato locale della galleria nascosta (nomi-file, non deve finire nel repo)
+nascoste.json

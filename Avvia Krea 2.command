@@ -28,15 +28,33 @@ PROJECT  = BASE.parent                              # .../Krea 2
 COMFYDIR = PROJECT / "ComfyUI"
 OUTPUT   = COMFYDIR / "output"                      # dove ComfyUI salva le immagini
 INPUT    = COMFYDIR / "input"                       # da dove LoadImage legge (per l'upscale)
+NASCOSTE_FILE = BASE / "nascoste.json"   # nomi-file nascosti dalla galleria (dato locale, NON nel repo)
 
 COMFY    = "http://127.0.0.1:8189"   # il motore
 PORT     = 8190                       # porta di questa interfaccia (separata)
+
+# Password della galleria nascosta. Riservatezza VISIVA, non sicurezza vera:
+# i file restano in output/, vengono solo tolti dalla griglia finche' non sblocchi.
+# NB: il repo e' PUBBLICO -> questa password sara' visibile su GitHub. Cambiala qui.
+PASSWORD_GALLERIA = "krea2"
 
 # Preset del nodo Rebalance = la "manopola" del modulo uncensored.
 PRESETS = {
     True:  {"multiplier": 4.0, "per_layer_weights": "1.0,1.0,1.0,1.0,1.0,1.0,1.0,2.5,5.0,1.1,4.0,1.0"},  # nudo
     False: {"multiplier": 1.0, "per_layer_weights": ""},                                                   # neutro
 }
+
+def load_nascoste():
+    """Insieme dei nomi-file nascosti. Robusto a file mancante o corrotto."""
+    try:
+        data = json.loads(NASCOSTE_FILE.read_text())
+        return set(data) if isinstance(data, list) else set()
+    except Exception:
+        return set()
+
+def save_nascoste(names):
+    """Salva l'insieme dei nascosti come array JSON ordinato."""
+    NASCOSTE_FILE.write_text(json.dumps(sorted(names)))
 
 # ---------------------------------------------------------------------------
 # Comunicazione con ComfyUI
@@ -233,6 +251,10 @@ PAGE = """<!DOCTYPE html>
                   border-radius:9px; padding:8px 16px; }
   .pager button:disabled { opacity:.4; cursor:default; }
   .pager span { color:var(--mut); font-size:13px; }
+  .gallerybar { display:flex; justify-content:flex-end; margin-top:18px; }
+  .reveal { background:var(--panel); color:var(--mut); border:1px solid var(--line);
+            border-radius:9px; padding:8px 14px; font-size:13px; cursor:pointer; }
+  .reveal:hover { background:#262a33; }
   #metadlg { background:var(--panel); color:var(--txt); border:1px solid var(--line);
              border-radius:14px; padding:20px; max-width:640px; width:92vw; }
   #metadlg h3 { margin:0 0 14px; }
@@ -256,7 +278,7 @@ PAGE = """<!DOCTYPE html>
 <div class="wrap">
   <div class="panel">
     <label>Prompt</label>
-    <textarea id="prompt" placeholder="Descrivi l'immagine in inglese...">full body photograph, head to toe, entire figure visible, face clearly visible, a beautiful young woman standing on a sandy beach, full-length portrait, completely nude, bare skin, no clothing, no towel, no fabric, natural body, relaxed pose, arms at her sides, golden hour sunlight, soft warm light, calm sea in the background, analog film photo, natural skin texture, fine grain, photorealistic</textarea>
+    <textarea id="prompt" placeholder="Descrivi l'immagine in inglese...">a serene mountain lake at sunset, photorealistic, golden light, soft reflections on the water, fine grain, analog film photo</textarea>
 
     <div class="row">
       <div>
@@ -299,6 +321,7 @@ PAGE = """<!DOCTYPE html>
     <div class="msg" id="msg"></div>
   </div>
 
+  <div class="gallerybar"><button id="reveal" class="reveal">&#128274; Mostra nascoste</button></div>
   <div class="grid" id="grid"></div>
   <div class="pager" id="pager" style="display:none">
     <button id="prev">&#8592; Indietro</button>
@@ -322,8 +345,33 @@ const PER = 6;            // immagini per pagina
 let items = [];           // {id,label,status:'pending'|'done'|'failed',file,canUpscale}
 let page = 0;
 let uid = 0;
+let unlocked = false;     // galleria nascosta sbloccata in questa sessione
 
 $("#dice").onclick = () => { $("#seed").value = ""; };
+
+$("#reveal").onclick = async () => {
+  if (unlocked){
+    items = items.filter(it => !it.hidden);   // richiudi: togli le nascoste dalla vista
+    unlocked = false;
+    $("#reveal").innerHTML = "&#128274; Mostra nascoste";
+    page = 0; render();
+    return;
+  }
+  const pw = prompt("Password per vedere le immagini nascoste:");
+  if (pw === null) return;
+  let res;
+  try { res = await (await fetch("/api/sblocca",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:pw})})).json(); }
+  catch(e){ setMsg("Errore di rete: "+e, true); return; }
+  if (!res.ok){ setMsg("Password sbagliata.", true); return; }
+  setMsg("");
+  (res.items || []).forEach(im => {
+    if (!items.some(it => it.file === im.file))
+      items.push({id:++uid, status:"done", file:im.file, label:"nascosta", canUpscale:!im.up, hidden:true});
+  });
+  unlocked = true;
+  $("#reveal").innerHTML = "&#128275; Richiudi";
+  page = 0; render();
+};
 
 $("#quit").onclick = async () => {
   if (!confirm("Chiudere l'interfaccia e il server? (ComfyUI resta acceso a parte.)")) return;
@@ -371,6 +419,20 @@ async function upscale(file){
   setMsg("");
 }
 
+async function nascondi(file){
+  try { await fetch("/api/nascondi",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({file})}); }
+  catch(e){ setMsg("Errore nel nascondere: "+e, true); return; }
+  items = items.filter(it => it.file !== file);
+  render();
+}
+async function mostra(file){
+  try { await fetch("/api/mostra",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({file})}); }
+  catch(e){ setMsg("Errore: "+e, true); return; }
+  const it = items.find(x => x.file === file);
+  if (it) it.hidden = false;
+  render();
+}
+
 function addItem(it){ it.id = ++uid; it.status = "pending"; items.unshift(it); page = 0; render(); return it; }
 
 async function poll(prompt_id, it){
@@ -394,10 +456,14 @@ function cardHTML(it){
             <div class="meta"><span>${it.label}</span></div></div>`;
   const url = "/img/"+encodeURIComponent(it.file);
   const up = it.canUpscale ? `<button data-act="up" data-file="${it.file}">&#10530; Upscale &#215;4</button>` : "";
+  const lock = it.hidden ? ` <span class="tag" title="immagine nascosta">&#128274;</span>` : "";
+  const hideBtn = it.hidden
+    ? `<button data-act="mostra" data-file="${it.file}">&#128065; Rendi visibile</button>`
+    : `<button data-act="nascondi" data-file="${it.file}">&#128584; Nascondi</button>`;
   return `<div class="card">
     <img src="${url}" data-act="zoom" data-file="${it.file}">
-    <div class="meta"><span>${it.label}</span><a href="${url}" download>scarica</a></div>
-    <div class="acts"><button data-act="meta" data-file="${it.file}">&#9432; Dati</button>${up}</div>
+    <div class="meta"><span>${it.label}${lock}</span><a href="${url}" download>scarica</a></div>
+    <div class="acts"><button data-act="meta" data-file="${it.file}">&#9432; Dati</button>${up}${hideBtn}</div>
   </div>`;
 }
 
@@ -422,6 +488,8 @@ grid.onclick = e => {
   if (b.dataset.act === "zoom") zoom("/img/"+encodeURIComponent(f));
   else if (b.dataset.act === "up") upscale(f);
   else if (b.dataset.act === "meta") showMeta(f);
+  else if (b.dataset.act === "nascondi") nascondi(f);
+  else if (b.dataset.act === "mostra") mostra(f);
 };
 $("#prev").onclick = () => { if (page>0){ page--; render(); } };
 $("#next").onclick = () => { page++; render(); };
@@ -499,7 +567,9 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/galleria":
             imgs = []
             try:
-                files = sorted(OUTPUT.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True)[:24]
+                nasc = load_nascoste()
+                files = sorted(OUTPUT.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
+                files = [p for p in files if p.name not in nasc]
                 imgs = [{"file": p.name, "up": p.name.startswith("Krea2_up")} for p in files]
             except Exception:
                 pass
@@ -534,6 +604,33 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/upscale":
             self._upscale(req); return
+
+        if path == "/api/sblocca":
+            if (req.get("password") or "") != PASSWORD_GALLERIA:
+                self._send(200, {"ok": False}); return
+            nasc = load_nascoste(); items = []
+            try:
+                files = sorted(OUTPUT.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
+                items = [{"file": p.name, "up": p.name.startswith("Krea2_up")}
+                         for p in files if p.name in nasc]
+            except Exception:
+                pass
+            self._send(200, {"ok": True, "items": items}); return
+
+        if path == "/api/nascondi":
+            name = os.path.basename(req.get("file") or "")
+            if not name:
+                self._send(400, {"error": "file mancante"}); return
+            nasc = load_nascoste(); nasc.add(name); save_nascoste(nasc)
+            self._send(200, {"ok": True}); return
+
+        if path == "/api/mostra":
+            name = os.path.basename(req.get("file") or "")
+            if not name:
+                self._send(400, {"error": "file mancante"}); return
+            nasc = load_nascoste(); nasc.discard(name); save_nascoste(nasc)
+            self._send(200, {"ok": True}); return
+
         if path != "/api/genera":
             self._send(404, "not found", "text/plain"); return
 
